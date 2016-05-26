@@ -6,124 +6,145 @@ ArduinoCloudYunThing::ArduinoCloudYunThing() {
 boolean ArduinoCloudYunThing::begin(const char* name, const char* username, const char* id, const char* password) {
     ArduinoCloudThingBase::begin(name, username, id, password);
 
-    return updateBridge();
+    if (updateBridge()) {
+        process.begin(F("python"));
+        process.addParameter(F("-u"));
+        process.addParameter(F("/usr/arduino-mqtt/bridge.py"));
+        process.runAsynchronously();
+        process.setTimeout(10000);
+
+        // wait for script to launch
+        process.readStringUntil('\n');
+        process.readStringUntil('\n');
+
+        return 1;
+    }
+
+    return 0;
 }
 
 boolean ArduinoCloudYunThing::updateBridge() {
     Process p;
 
-    int r1 = p.runShellCommand("mkdir -p /usr/arduino-mqtt");
-    int r2 = p.runShellCommand("wget -N https://raw.githubusercontent.com/256dpi/arduino-mqtt/v1.9.6/yun/mqtt.py --no-check-certificate -P /usr/arduino-mqtt");
-    int r3 = p.runShellCommand("wget -N https://raw.githubusercontent.com/256dpi/arduino-mqtt/v1.9.6/yun/bridge.py --no-check-certificate -P /usr/arduino-mqtt");
+    int r1 = p.runShellCommand(F("mkdir -p /usr/arduino-mqtt"));
+    int r2 = p.runShellCommand(F("wget -N https://raw.githubusercontent.com/sandeepmistry/arduino-mqtt/yun-tls/yun/mqtt.py --no-check-certificate -P /usr/arduino-mqtt"));
+    int r3 = p.runShellCommand(F("wget -N https://raw.githubusercontent.com/sandeepmistry/arduino-mqtt/yun-tls/yun/bridge.py --no-check-certificate -P /usr/arduino-mqtt"));
 
     return r1 == 0 && r2 == 0 && r3 == 0;
 }
 
 boolean ArduinoCloudYunThing::connect() {
-    process.begin("python");
-    process.addParameter("-u");
-    process.addParameter("/usr/arduino-mqtt/bridge.py");
-    process.runAsynchronously();
-    process.setTimeout(10000);
+    const char* willPayload = "offline";
+    String willTopic;
 
-    // wait for script to launch
-    process.readStringUntil('\n');
+    willTopic += username;
+    willTopic += "/";
+    willTopic += name;
+    willTopic += "/status";
 
-    // process.print("w:");
-    // process.print(willTopic);
-    // process.print(':');
-    // process.print(strlen(willPayload));
-    // process.print(';');
-    // process.print(willPayload);
-    // process.print('\n');
+    process.print(F("w:"));
+    process.print(willTopic);
+    process.print(F(":"));
+    process.print(strlen(willPayload));
+    process.print(F(";"));
+    process.print(willPayload);
+    process.print(F("\n"));
+
+    process.print(F("t:/etc/ssl/certs/Go_Daddy_Class_2_CA.crt;\n"));
 
     // send connect request
-    process.print("c:");
+    process.print(F("c:"));
     process.print(SERVER_DOMAIN);
-    process.print(':');
+    process.print(F(":"));
     process.print(SERVER_PORT);
-    process.print(':');
+    process.print(F(":"));
     process.print(name);
-    process.print(':');
+    process.print(F(":"));
     process.print(id);
-    process.print(':');
+    process.print(F(":"));
     process.print(password);
-    process.print(";\n");
+    process.print(F(";\n"));
 
     // wait for answer
     String ret = process.readStringUntil('\n');
-    alive = ret.equals("a;");
+    alive = ret.equals(F("a;"));
 
     if(!alive) {
-    process.close();
-    return false;
+        process.close();
+        return false;
+    } else {
+        publish(willTopic.c_str(), "online");
+
+        mqttSubscribe();
     }
 
     return true;
 }
 
 void ArduinoCloudYunThing::publish(const char * topic, const char * payload) {
-  publish(topic, (char*)payload, strlen(payload));
+    publish(topic, (char*)payload, strlen(payload));
 }
 
 void ArduinoCloudYunThing::publish(const char * topic, char * payload, unsigned int length) {
-  // send publish request
-  process.print("p:");
-  process.print(topic);
-  process.print(':');
-  process.print(length);
-  process.print(';');
+    // send publish request
+    process.print(F("p:"));
+    process.print(topic);
+    process.print(F(":"));
+    process.print(length);
+    process.print(F(";"));
 
-  for(unsigned int i=0; i<length; i++) {
-    process.write(payload[i]);
-  }
+    for(unsigned int i=0; i<length; i++) {
+        process.write(payload[i]);
+    }
 
-  process.print('\n');
+    process.print('\n');
 }
 
-void ArduinoCloudYunThing::subscribe(const char * topic) {
+void ArduinoCloudYunThing::mqttSubscribe() {
     for (int i=0; i<properties_count; i++){
         if (strcmp(properties[i]->permission, "RW") == 0){
             String topic = buildTopicProperty(i);
 
-            process.print("s:");
+            process.print(F("s:"));
             process.print(topic);
-            process.print(";\n");
+            process.print(F(";\n"));
         }
     }
-  process.print("s:");
-  process.print(topic);
-  process.print(";\n");
 }
 
 void ArduinoCloudYunThing::poll() {
-  int av = this->process.available();
-  if(av > 0) {
-    String ret = process.readStringUntil(';');
+    int av = this->process.available();
 
-    if(ret.startsWith("m")) {
-      int startTopic = 2;
-      int endTopic = ret.indexOf(':', startTopic + 1);
-      String topic = ret.substring(startTopic, endTopic);
+    if(av > 0) {
+        String ret = process.readStringUntil(';');
 
-      int startPayloadLength = endTopic + 1;
-      int endPayloadLength = ret.indexOf(':', startPayloadLength + 1);
-      int payloadLength = ret.substring(startPayloadLength, endPayloadLength).toInt();
+        if(ret.startsWith("m")) {
+            int startTopic = 2;
+            int endTopic = ret.indexOf(':', startTopic + 1);
+            String topic = ret.substring(startTopic, endTopic);
 
-      char buf[payloadLength+1];
-      process.readBytes(buf, payloadLength);
-      buf[payloadLength] = '\0';
+            int startPayloadLength = endTopic + 1;
+            int endPayloadLength = ret.indexOf(':', startPayloadLength + 1);
+            int payloadLength = ret.substring(startPayloadLength, endPayloadLength).toInt();
 
-    //   messageReceived(topic, String(buf), buf, payloadLength);
-    } else if(ret.startsWith("e")) {
-      alive = false;
-      process.close();
+            char buf[payloadLength+1];
+            process.readBytes(buf, payloadLength);
+            buf[payloadLength] = '\0';
+
+            updatePropertyFromTopic(topic.c_str(), buf);
+        } else if(ret.startsWith("e")) {
+            alive = false;
+            process.close();
+        }
+
+        process.readStringUntil('\n');
     }
 
-    process.readStringUntil('\n');
-  }
+    if (!alive) {
+        connect();
+    }
 }
 
 boolean ArduinoCloudYunThing::connected() {
-  return process.running() && alive;
+    return process.running() && alive;
 }

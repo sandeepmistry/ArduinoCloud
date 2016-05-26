@@ -18,7 +18,7 @@ protected:
 private:
     boolean connect();
     void publish(const char * topic, char * payload, unsigned int length);
-    void subscribe(const char * topic);
+    void mqttSubscribe();
     boolean connected();
 
     Process process;
